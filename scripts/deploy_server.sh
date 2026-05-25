@@ -111,6 +111,7 @@ User=$APP_USER
 Group=$APP_GROUP
 WorkingDirectory=$WEB_DIR
 Environment=PYTHONUNBUFFERED=1
+Environment=GRADIO_HOST=0.0.0.0
 ExecStart=$VENV_DIR/bin/python app.py
 Restart=always
 RestartSec=5

@@ -5,7 +5,8 @@
 # Gradio 6.x changes theme/font handling used by this app; keep the
 # deployment on the locally verified version.
 gradio==4.44.1
-fastapi>=0.100.0
+fastapi==0.128.8
+starlette==0.49.3
 uvicorn>=0.22.0
 
 # HTTP Client
