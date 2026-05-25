@@ -45,7 +45,6 @@ sync_code() {
 
   if [ ! -d "$APP_DIR/.git" ]; then
     log "Cloning $REPO_URL to $APP_DIR"
-    rm -rf "$APP_DIR"
     git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
   else
     log "Pulling latest $BRANCH"
