@@ -2,7 +2,9 @@
 # Install with: pip install -r requirements.txt
 
 # Core Web Framework
-gradio>=4.0.0
+# Gradio 6.x changes theme/font handling used by this app; keep the
+# deployment on the locally verified version.
+gradio==4.44.1
 fastapi>=0.100.0
 uvicorn>=0.22.0
 
