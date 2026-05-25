@@ -60,7 +60,7 @@ cp .env.example .env
 Edit `.env` with your settings:
 ```env
 NANA_BANANA_API_KEY=your_api_key_here
-GRADIO_PORT=7861
+GRADIO_PORT=8862
 API_PORT=8000
 ```
 
@@ -68,7 +68,7 @@ API_PORT=8000
 
 ### Web UI (Gradio)
 
-Access the web interface at: `http://localhost:7861`
+Access the web interface at: `http://localhost:8862`
 
 ### REST API
 
@@ -93,7 +93,7 @@ All configuration is managed through environment variables. See `.env.example` f
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `NANA_BANANA_API_KEY` | API key for image generation | Required |
-| `GRADIO_PORT` | Port for Gradio UI | 7861 |
+| `GRADIO_PORT` | Port for Gradio UI | 8862 |
 | `API_PORT` | Port for REST API | 8000 |
 | `CORS_ORIGINS` | Allowed CORS origins | * |
 | `MAX_UPLOAD_SIZE_MB` | Maximum file upload size | 50 |

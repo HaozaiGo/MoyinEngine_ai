@@ -90,7 +90,7 @@ def create_env_file(config: dict) -> str:
         f"NANA_BANANA_BASE_URL={config.get('api_base_url', 'https://api.nanabanana.pro')}",
         "",
         "# Server Configuration",
-        f"GRADIO_PORT={config.get('gradio_port', 7861)}",
+        f"GRADIO_PORT={config.get('gradio_port', 8862)}",
         f"API_PORT={config.get('api_port', 8000)}",
         "",
         "# CORS Configuration",
@@ -215,7 +215,7 @@ def run_wizard(force: bool = False) -> bool:
     print()
 
     while True:
-        port_str = get_input("Gradio UI port", "7861")
+        port_str = get_input("Gradio UI port", "8862")
         valid, port, error = validate_port(port_str)
         if valid:
             config['gradio_port'] = port

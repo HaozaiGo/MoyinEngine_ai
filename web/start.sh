@@ -8,15 +8,15 @@ echo
 
 cd "$(dirname "$0")"
 
-# Check and kill process on port 7861
-echo "[1/4] Checking port 7861..."
-PID=$(lsof -t -i:7861 2>/dev/null)
+# Check and kill process on port 8862
+echo "[1/4] Checking port 8862..."
+PID=$(lsof -t -i:8862 2>/dev/null)
 if [ -n "$PID" ]; then
     echo "       Found process (PID: $PID)"
     echo "       Killing..."
     kill -9 $PID 2>/dev/null
 fi
-echo "       Port 7861 cleared"
+echo "       Port 8862 cleared"
 
 echo
 echo "[2/4] Checking dependencies..."
@@ -48,7 +48,7 @@ echo
 echo "[4/4] Starting server..."
 echo
 echo "============================================"
-echo "   Server URL: http://localhost:7861"
+echo "   Server URL: http://localhost:8862"
 echo "   Press Ctrl+C to stop"
 echo "============================================"
 echo

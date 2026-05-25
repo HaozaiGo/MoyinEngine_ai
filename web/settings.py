@@ -93,7 +93,7 @@ class Settings:
     # 服务器配置
     # ===========================================
     gradio_port: int = field(default_factory=lambda: int(os.environ.get(
-        "GRADIO_PORT", "7861"
+        "GRADIO_PORT", "8862"
     )))
     gradio_host: str = field(default_factory=lambda: os.environ.get(
         "GRADIO_HOST", "0.0.0.0"

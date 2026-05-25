@@ -59,7 +59,7 @@ cp .env.example .env
 默认访问地址：
 
 ```text
-http://127.0.0.1:7861
+http://127.0.0.1:8862
 ```
 
 ## GitHub Actions 部署
