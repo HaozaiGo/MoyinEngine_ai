@@ -1,0 +1,51 @@
+name: Deploy Director AI
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: director-ai-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to server
+    runs-on: ubuntu-latest
+
+    env:
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+      APP_DIR: /opt/MoyinEngine_ai
+      REPO_URL: https://github.com/HaozaiGo/MoyinEngine_ai.git
+      BRANCH: master
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_SSH_KEY"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          test -n "$DEPLOY_USER"
+          ssh -i ~/.ssh/deploy_key \
+            -p "$DEPLOY_PORT" \
+            -o IdentitiesOnly=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "APP_DIR='$APP_DIR' REPO_URL='$REPO_URL' BRANCH='$BRANCH' bash -s" \
+            < scripts/deploy_server.sh

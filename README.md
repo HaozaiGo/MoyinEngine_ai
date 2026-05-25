@@ -62,6 +62,35 @@ cp .env.example .env
 http://127.0.0.1:7861
 ```
 
+## GitHub Actions 部署
+
+项目已提供 GitHub Actions 部署 workflow：[.github/workflows/deploy.yml](.github/workflows/deploy.yml)。
+
+推送到 `master` 或手动触发 workflow 后，Actions 会通过 SSH 登录服务器，在 `/opt/MoyinEngine_ai` 拉取最新代码，安装 `web/requirements.txt`，并通过 systemd 管理 `director-ai` 服务。
+
+需要在 GitHub 仓库 `Settings -> Secrets and variables -> Actions` 中配置：
+
+```text
+DEPLOY_HOST=35.220.200.97
+DEPLOY_USER=huangguojie
+DEPLOY_SSH_KEY=<服务器私钥内容>
+DEPLOY_PORT=22
+```
+
+服务器上的运行目录：
+
+```text
+/opt/MoyinEngine_ai
+```
+
+服务管理命令：
+
+```bash
+sudo systemctl status director-ai
+sudo systemctl restart director-ai
+sudo journalctl -u director-ai -f
+```
+
 ## 环境变量
 
 常用配置项：
@@ -129,4 +158,3 @@ director_ai/
 - Wan 视频生成
 - 单选/多选镜头视频生成
 - 图片与视频加载、预览和状态刷新
-
