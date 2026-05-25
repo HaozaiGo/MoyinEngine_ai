@@ -43,8 +43,8 @@ from canghe_api import CangheAPIClient, VideoModel
 
 
 # 配置 - 从统一设置加载
-# 苍何 API 密钥 (用于云端图像生成)
-API_KEY = settings.api_key
+# 云端 API 密钥 (用于 SeedreamBest 同款 MuleRouter/Wan 图像/视频生成)
+API_KEY = getattr(settings, "mulerouter_api_key", "") or settings.api_key
 # 图像生成后端: "canghe" (苍何云端) 或 "comfyui" (本地)
 IMAGE_BACKEND = settings.image_backend
 
@@ -75,13 +75,61 @@ current_project: Optional[StoryboardProject] = None
 # 统一苍何 API 配置
 _canghe_unified_config = {
     "api_key": "",
-    "enabled": True,  # 默认启用苍何 API
-    "llm_enabled": True,  # 文字生成
+    "enabled": True,  # 默认启用 SeedreamBest 同款 MuleRouter/Wan API
+    "llm_enabled": False,  # SeedreamBest 同款链路只覆盖图像/视频；文字可单独配置
     "image_enabled": True,  # 图像生成
     "video_enabled": True,  # 视频生成
-    "image_model": "nano-banana",  # 图像模型: nano-banana (即梦仅支持视频)
-    "video_model": "veo3.1-fast",  # 视频模型
+    "image_model": "wan2.6-t2i",
+    "video_model": "wan2.7-i2v-spicy",
 }
+
+
+PLACEHOLDER_API_KEYS = {"", "your_api_key_here", "your_ark_api_key_here", "your_mulerouter_api_key_here"}
+
+
+def is_real_api_key(api_key: str) -> bool:
+    return bool(api_key and api_key.strip() and api_key.strip() not in PLACEHOLDER_API_KEYS)
+
+
+def resolve_generation_api_key() -> str:
+    """Resolve the image/video generation API key without letting empty UI state shadow .env."""
+    saved_config = get_saved_unified_config()
+    candidates = [
+        _canghe_unified_config.get("api_key", ""),
+        saved_config.get("api_key", ""),
+        getattr(settings, "mulerouter_api_key", ""),
+        API_KEY,
+        settings.api_key,
+    ]
+    for candidate in candidates:
+        if is_real_api_key(candidate):
+            return candidate.strip()
+    return ""
+
+
+def normalize_chat_completions_url(api_url: str) -> str:
+    api_url = (api_url or "").strip().rstrip("/")
+    if not api_url:
+        return ""
+    if api_url.endswith("/chat/completions"):
+        return api_url
+    if api_url.endswith("/v1"):
+        return f"{api_url}/chat/completions"
+    return api_url
+
+
+def get_env_llm_config() -> Dict[str, str]:
+    api_key = os.environ.get("QWEN_API_KEY", "").strip()
+    api_url = normalize_chat_completions_url(os.environ.get("QWEN_API_URL") or os.environ.get("QWEN_BASE_URL", ""))
+    provider = os.environ.get("LLM_PROVIDER", "Qwen (OpenAI兼容)" if api_key else "Claude Code CLI (默认)")
+    model = os.environ.get("QWEN_LLM_MODEL", "qwen-plus")
+    return {
+        "provider": provider,
+        "api_key": api_key,
+        "api_url": api_url,
+        "model": model,
+        "region": "cn",
+    }
 
 
 def fuzzy_match_name(target: str, candidates: list, threshold: float = 0.5) -> Optional[Any]:
@@ -139,13 +187,14 @@ def save_user_config():
     global API_CONFIG, _canghe_unified_config
     try:
         from image_generator import _canghe_api_key, _current_canghe_model
-        from ai_creative_generator import _llm_provider, _llm_api_key
+        from ai_creative_generator import _llm_provider, _llm_api_key, _llm_api_url
 
         config = {
             "canghe_api_key": _canghe_api_key or "",
             "canghe_model": _current_canghe_model.value if hasattr(_current_canghe_model, 'value') else str(_current_canghe_model),
             "llm_provider": _llm_provider or "Claude Code CLI (默认)",
             "llm_api_key": _llm_api_key or "",
+            "llm_api_url": _llm_api_url or "",
             "image_backend": os.environ.get("IMAGE_BACKEND", "canghe"),
             "api_config": API_CONFIG,
             # 统一苍何 API 配置
@@ -231,13 +280,19 @@ def get_saved_config():
 def get_saved_canghe_api_key():
     """获取保存的苍何 API Key"""
     config = get_saved_config()
-    return config.get("canghe_api_key", "") or (settings.api_key if settings.api_key != "your_api_key_here" else "")
+    return (
+        config.get("canghe_api_key", "")
+        or getattr(settings, "mulerouter_api_key", "")
+        or (settings.api_key if settings.api_key != "your_api_key_here" else "")
+    )
 
 
 def get_saved_canghe_model():
     """获取保存的苍何模型选择"""
     config = get_saved_config()
-    model = config.get("canghe_model", "nano-banana")
+    model = config.get("canghe_model", "wan2.6-t2i")
+    if "wan" in model.lower() or "seedream" in model.lower() or "doubao" in model.lower():
+        return "Wan 2.6 T2I (SeedreamBest)"
     if "jimeng" in model.lower():
         return "即梦 (Jimeng)"
     return "Nano-Banana (Google Imagen)"
@@ -246,9 +301,11 @@ def get_saved_canghe_model():
 def get_saved_canghe_model_v2():
     """获取保存的苍何图像模型选择 (v2 - 支持 DALL-E 3)"""
     config = get_saved_config()
-    model = config.get("canghe_image_model", config.get("canghe_model", "nano-banana"))
+    model = config.get("canghe_image_model", config.get("canghe_model", "wan2.6-t2i"))
     model_lower = model.lower()
-    if "dall" in model_lower or "dalle" in model_lower:
+    if "wan" in model_lower or "seedream" in model_lower or "doubao" in model_lower:
+        return "Wan 2.6 T2I (默认)"
+    elif "dall" in model_lower or "dalle" in model_lower:
         return "DALL-E 3"
     else:
         return "Nano-Banana (默认)"
@@ -260,11 +317,12 @@ def apply_image_model(model_choice: str):
 
     # 映射 UI 选项到内部模型名
     model_map = {
+        "Wan 2.6 T2I (默认)": "wan2.6-t2i",
         "Nano-Banana (默认)": "nano-banana",
         "DALL-E 3": "dall-e-3",
     }
 
-    model_name = model_map.get(model_choice, "nano-banana")
+    model_name = model_map.get(model_choice, "wan2.6-t2i")
 
     # 设置模型
     set_canghe_model(model_name)
@@ -275,12 +333,15 @@ def apply_image_model(model_choice: str):
     save_config(config)
 
     # 返回状态
-    status_emoji = {"nano-banana": "🍌", "dall-e-3": "🎨"}
+    status_emoji = {"wan2.6-t2i": "🌋", "nano-banana": "🍌", "dall-e-3": "🎨"}
     return f"{status_emoji.get(model_name, '✅')} 已切换到 {model_choice}"
 
 
 def get_saved_llm_provider():
     """获取保存的 LLM 提供商"""
+    env_llm = get_env_llm_config()
+    if is_real_api_key(env_llm.get("api_key", "")):
+        return env_llm["provider"]
     config = get_saved_config()
     return config.get("llm_provider", "Claude Code CLI (默认)")
 
@@ -291,6 +352,10 @@ def get_saved_image_backend():
     backend = config.get("image_backend", "canghe")
     if backend == "comfyui":
         return "本地 ComfyUI"
+    unified = config.get("canghe_unified", {})
+    image_model = unified.get("image_model", "")
+    if "wan" in image_model or "seedream" in image_model or "doubao" in image_model or not image_model:
+        return "SeedreamBest / MuleRouter Wan"
     return "苍何 API (云端)"
 
 
@@ -298,17 +363,26 @@ def get_saved_unified_config():
     """获取保存的统一苍何 API 配置"""
     config = get_saved_config()
     saved = config.get("canghe_unified", {})
+    env_router_key = getattr(settings, "mulerouter_api_key", "")
+    if env_router_key in ("your_api_key_here", "your_ark_api_key_here", "your_mulerouter_api_key_here"):
+        env_router_key = ""
     # 合并默认值
     default = {
-        "api_key": config.get("canghe_api_key", ""),
+        "api_key": config.get("canghe_api_key", "") or env_router_key,
         "enabled": True,
-        "llm_enabled": True,
+        "llm_enabled": False,
         "image_enabled": True,
         "video_enabled": True,
-        "image_model": "nano-banana",  # 即梦仅支持视频
-        "video_model": "veo3.1-fast",
+        "image_model": "wan2.6-t2i",
+        "video_model": "wan2.7-i2v-spicy",
     }
     default.update(saved)
+    image_model = str(default.get("image_model", "")).lower()
+    video_model = str(default.get("video_model", "")).lower()
+    if "doubao-seedream" in image_model or "seedream" in image_model:
+        default["image_model"] = "wan2.6-t2i"
+    if "doubao-seedance" in video_model or "seedance" in video_model:
+        default["video_model"] = "wan2.7-i2v-spicy"
     return default
 
 
@@ -318,7 +392,7 @@ def save_unified_canghe_config(api_key: str, llm_enabled: bool, image_enabled: b
     global _canghe_unified_config, API_KEY
 
     if not api_key or not api_key.strip():
-        return "❌ 请输入苍何 API Key"
+        return "❌ 请输入 MuleRouter API Key"
 
     api_key = api_key.strip()
 
@@ -329,7 +403,7 @@ def save_unified_canghe_config(api_key: str, llm_enabled: bool, image_enabled: b
         "llm_enabled": llm_enabled,
         "image_enabled": image_enabled,
         "video_enabled": video_enabled,
-        "image_model": "jimeng" if "即梦" in image_model else "nano-banana",
+        "image_model": "wan2.6-t2i" if ("Wan" in image_model or "Seedream" in image_model) else ("jimeng" if "即梦" in image_model else "nano-banana"),
         "video_model": video_model,
     }
 
@@ -355,7 +429,7 @@ def save_unified_canghe_config(api_key: str, llm_enabled: bool, image_enabled: b
     if video_enabled:
         status_parts.append("视频")
 
-    return f"✅ 苍何 API 配置已保存！已启用: {', '.join(status_parts)}"
+    return f"✅ SeedreamBest 同款 Wan 模型配置已保存！已启用: {', '.join(status_parts)}"
 
 
 def get_canghe_api_status() -> str:
@@ -455,16 +529,18 @@ def get_video_for_preview(shot_num: int) -> str:
     """获取指定镜头的视频路径用于预览"""
     global current_project
     if current_project is None:
-        return None
+        return gr.update(value=None, visible=False)
 
     shot_num = int(shot_num)
     if shot_num < 1 or shot_num > len(current_project.shots):
-        return None
+        return gr.update(value=None, visible=False)
 
     shot = current_project.shots[shot_num - 1]
-    if shot.output_video and os.path.exists(shot.output_video):
-        return shot.output_video
-    return None
+    video_path = find_matching_video_for_shot(shot)
+    if video_path:
+        shot.output_video = video_path
+        return gr.update(value=video_path, visible=True)
+    return gr.update(value=None, visible=False)
 
 
 def auto_load_project() -> bool:
@@ -541,9 +617,9 @@ def scan_and_link_images(project: StoryboardProject) -> int:
             if not shot.output_image or not os.path.exists(shot.output_image):
                 shot.output_image = str(recent_images[i])
                 # 检查是否有对应的视频
-                video_path = recent_images[i].with_suffix('.mp4')
-                if video_path.exists():
-                    shot.output_video = str(video_path)
+                video_path = find_matching_video_for_shot(shot)
+                if video_path:
+                    shot.output_video = video_path
                 linked += 1
                 print(f"[扫描] 镜头 {shot.shot_number} 关联图片: {recent_images[i].name}")
 
@@ -705,6 +781,30 @@ def load_images_only(batch_choice: str) -> Tuple[str, str]:
     return result_msg, get_shot_cards_html()
 
 
+def find_matching_video_for_shot(shot) -> Optional[str]:
+    """Find a generated video for a shot, including provider-suffixed filenames."""
+    if shot.output_video and os.path.exists(shot.output_video):
+        return shot.output_video
+
+    if not shot.output_image or not os.path.exists(shot.output_image):
+        return None
+
+    image_path = Path(shot.output_image)
+    exact_candidates = [
+        image_path.with_suffix(ext)
+        for ext in (".mp4", ".webm", ".avi", ".mov")
+    ]
+    wildcard_candidates = []
+    for ext in ("*.mp4", "*.webm", "*.avi", "*.mov"):
+        wildcard_candidates.extend(image_path.parent.glob(f"{image_path.stem}_*{ext[1:]}"))
+
+    candidates = [p for p in exact_candidates + wildcard_candidates if p.exists()]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(candidates[0])
+
+
 def load_videos_only(batch_choice: str) -> Tuple[str, str]:
     """只加载视频（基于当前图片路径）"""
     global current_project
@@ -721,14 +821,13 @@ def load_videos_only(batch_choice: str) -> Tuple[str, str]:
 
     linked_videos = 0
     for shot in current_project.shots:
-        if shot.output_image and os.path.exists(shot.output_image):
-            video_path = Path(shot.output_image).with_suffix('.mp4')
-            if video_path.exists():
-                shot.output_video = str(video_path)
-                linked_videos += 1
-                print(f"[加载视频] 镜头 {shot.shot_number}: {video_path.name}")
-            else:
-                shot.output_video = ""
+        video_path = find_matching_video_for_shot(shot)
+        if video_path:
+            shot.output_video = video_path
+            linked_videos += 1
+            print(f"[加载视频] 镜头 {shot.shot_number}: {Path(video_path).name}")
+        else:
+            shot.output_video = ""
 
     auto_save_project()
 
@@ -766,9 +865,9 @@ def load_image_batch(batch_choice: str) -> Tuple[str, str]:
         img_path = batch_files[i]
         if os.path.exists(img_path):
             shot.output_image = img_path
-            video_path = Path(img_path).with_suffix('.mp4')
-            if video_path.exists():
-                shot.output_video = str(video_path)
+            video_path = find_matching_video_for_shot(shot)
+            if video_path:
+                shot.output_video = video_path
                 linked_videos += 1
             else:
                 shot.output_video = ""
@@ -1195,6 +1294,13 @@ def generate_story_from_idea(story_idea: str):
         llm_config = get_llm_config()
         print(f"[一句话生成] 初始 LLM 配置: provider={llm_config.get('provider')}, has_key={bool(llm_config.get('api_key'))}")
 
+        # 优先使用 .env 中配置的 Qwen/OpenAI-compatible LLM。
+        env_llm = get_env_llm_config()
+        if is_real_api_key(env_llm.get("api_key", "")):
+            API_CONFIG["llm"] = env_llm
+            set_llm_config(provider=env_llm["provider"], api_key=env_llm["api_key"], api_url=env_llm["api_url"])
+            print(f"[一句话生成] 已配置 LLM: {env_llm['provider']}, model={env_llm.get('model')}")
+
         # 直接从配置文件读取苍何 API key
         saved_config = get_saved_unified_config()
         canghe_key = saved_config.get("api_key", "")
@@ -1203,10 +1309,10 @@ def generate_story_from_idea(story_idea: str):
         print(f"[一句话生成] 配置文件: has_key={bool(canghe_key)}, llm_enabled={llm_enabled}")
 
         # 如果配置了苍何 API key 且启用了 LLM，强制使用苍何 API
-        if canghe_key and llm_enabled:
+        if not is_real_api_key(env_llm.get("api_key", "")) and canghe_key and llm_enabled:
             set_llm_config(provider="苍何 API", api_key=canghe_key)
             print(f"[一句话生成] 已强制配置 LLM 为苍何 API")
-        elif not canghe_key:
+        elif not is_real_api_key(env_llm.get("api_key", "")) and not canghe_key:
             print(f"[一句话生成] 警告: 苍何 API Key 未配置，将使用 Claude CLI 或 fallback")
 
         # 使用 AI 服务分析故事
@@ -1934,19 +2040,17 @@ def generate_single_shot(shot_num: int, custom_prompt: str = "") -> Tuple[str, O
         prompt = generate_shot_prompt(shot, current_project)
         shot.generated_prompt = prompt
 
-    # 检查 API Key
-    effective_api_key = API_KEY
-    if _canghe_unified_config.get("enabled") and _canghe_unified_config.get("image_enabled"):
-        effective_api_key = _canghe_unified_config.get("api_key", "")
+    # 检查 API Key：优先使用页面保存配置，其次使用 .env 中的 MuleRouter/SeedreamBest key。
+    effective_api_key = resolve_generation_api_key()
 
-    if not effective_api_key or effective_api_key == "your_api_key_here":
-        cli_output_history.append("[图像生成] ✗ 错误: API Key 未配置，请在设置中配置苍何 API Key")
-        return "API Key 未配置，请先在设置中配置", None
+    if not effective_api_key:
+        cli_output_history.append("[图像生成] ✗ 错误: MuleRouter API Key 未配置")
+        return "MuleRouter API Key 未配置，请先在 .env 或顶部 SeedreamBest Wan 配置中设置", None
 
     cli_output_history.append(f"[图像生成] 开始生成镜头 {shot_num}...")
-    cli_output_history.append(f"[图像生成] 使用 API: {'苍何统一' if _canghe_unified_config.get('enabled') else '默认'}")
-    cli_output_history.append(f"[图像生成] 图像模型: {_canghe_unified_config.get('image_model', 'nano-banana')}")
-    cli_output_history.append(f"[图像生成] API Key: {effective_api_key[:10]}...{effective_api_key[-4:] if len(effective_api_key) > 14 else ''}")
+    cli_output_history.append(f"[图像生成] 使用 API: SeedreamBest / MuleRouter Wan")
+    cli_output_history.append(f"[图像生成] 图像模型: {get_saved_unified_config().get('image_model', 'wan2.6-t2i')}")
+    cli_output_history.append("[图像生成] API Key: 已配置")
     cli_output_history.append(f"[图像生成] 提示词: {prompt[:60]}...")
 
     try:
@@ -1987,7 +2091,11 @@ def generate_all_shots() -> str:
     if not current_project.shots:
         return "请先添加镜头", []
 
-    generator = create_generator(API_KEY, str(OUTPUTS_DIR))
+    effective_api_key = resolve_generation_api_key()
+    if not effective_api_key:
+        return "MuleRouter API Key 未配置，请先在 .env 或顶部 SeedreamBest Wan 配置中设置", []
+
+    generator = create_generator(effective_api_key, str(OUTPUTS_DIR))
     success = 0
     total = len(current_project.shots)
     cli_output_history.append(f"[批量生成] 开始生成 {total} 个镜头...")
@@ -2068,7 +2176,7 @@ def generate_video_with_canghe_api(
     shot,
     project,
     prompt: str,
-    model: str = "veo3.1-fast",
+    model: str = "wan2.7-i2v-spicy",
     gen_mode: str = "文生视频",
     log_lines: list = None
 ) -> Tuple[bool, Optional[str], str]:
@@ -2092,42 +2200,52 @@ def generate_video_with_canghe_api(
     if log_lines is None:
         log_lines = []
 
-    print(f"[视频生成] 开始调用苍何 API...")
-    cli_output_history.append(f"[视频生成] 开始调用苍何 API, 模型: {model}")
+    provider_name = "MuleRouter Wan" if str(model).startswith("wan") else "苍何 API"
+    print(f"[视频生成] 开始调用{provider_name}...")
+    cli_output_history.append(f"[视频生成] 开始调用{provider_name}, 模型: {model}")
 
     config = get_saved_unified_config()
     api_key = config.get("api_key", "")
     print(f"[视频生成] 配置: api_key={'已配置' if api_key else '未配置'}, video_enabled={config.get('video_enabled')}")
 
     if not api_key:
-        return False, None, "苍何 API Key 未配置"
+        return False, None, f"{provider_name} API Key 未配置"
 
     if not config.get("video_enabled", True):
         return False, None, "苍何视频生成未启用"
 
-    log_lines.append(f"> [苍何 API] 使用模型: {model}")
+    log_lines.append(f"> [{provider_name}] 使用模型: {model}")
 
     try:
-        client = CangheAPIClient(api_key)
-
         # 准备图片 URL (图生视频模式)
         images = None
         if gen_mode == "图生视频" and shot.output_image and os.path.exists(shot.output_image):
-            # 需要将本地图片上传或转换为 URL
-            # 这里先使用 base64 data URL (部分 API 支持)
-            log_lines.append(f"> [苍何 API] 图生视频模式，源图片: {shot.output_image}")
-            # 注意：实际使用时可能需要先上传图片获取 URL
-            # 这里假设 API 支持 base64 或需要图片 URL
-            # images = [shot.output_image]  # 如果 API 支持本地路径
+            log_lines.append(f"> [{provider_name}] 图生视频模式，源图片: {shot.output_image}")
+            images = [shot.output_image]
 
         # 获取宽高比
         aspect_ratio = project.aspect_ratio if project else "16:9"
-        log_lines.append(f"> [苍何 API] 宽高比: {aspect_ratio}")
+        log_lines.append(f"> [{provider_name}] 宽高比: {aspect_ratio}")
 
         # 调用视频生成
-        log_lines.append(f"> [苍何 API] 正在生成视频，请稍候...")
+        log_lines.append(f"> [{provider_name}] 正在生成视频，请稍候...")
 
         async def _generate():
+            if str(model).startswith("wan"):
+                from mulerouter_providers import create_wan_video
+                from settings import settings
+                return await create_wan_video(
+                    api_key=api_key,
+                    prompt=prompt,
+                    images=images,
+                    model=model,
+                    base_url=getattr(settings, "mulerouter_video_base_url", "https://api.mulerouter.ai"),
+                    ratio=aspect_ratio,
+                    duration=5,
+                    resolution="1080p",
+                    generate_audio=True,
+                )
+            client = CangheAPIClient(api_key)
             if "jimeng" in model.lower():
                 # 使用即梦视频
                 return await client.create_jimeng_video_unified(
@@ -2157,8 +2275,8 @@ def generate_video_with_canghe_api(
             loop.close()
 
         if result and result.video_url:
-            log_lines.append(f"> [苍何 API] ✓ 视频生成成功")
-            log_lines.append(f"> [苍何 API] 视频 URL: {result.video_url[:80]}...")
+            log_lines.append(f"> [{provider_name}] ✓ 视频生成成功")
+            log_lines.append(f"> [{provider_name}] 视频 URL: {result.video_url[:80]}...")
             cli_output_history.append(f"[视频生成] ✓ 视频生成成功")
             print(f"[视频生成] ✓ 视频 URL: {result.video_url[:80]}...")
 
@@ -2171,12 +2289,12 @@ def generate_video_with_canghe_api(
                 video_dir.mkdir(parents=True, exist_ok=True)
                 video_path = str(video_dir / f"shot_{shot.shot_number:03d}_{timestamp}.mp4")
 
-            log_lines.append(f"> [苍何 API] 正在下载视频...")
+            log_lines.append(f"> [{provider_name}] 正在下载视频...")
             response = httpx.get(result.video_url, timeout=120.0, follow_redirects=True)
             if response.status_code == 200:
                 with open(video_path, 'wb') as f:
                     f.write(response.content)
-                log_lines.append(f"> [苍何 API] ✓ 视频已保存: {video_path}")
+                log_lines.append(f"> [{provider_name}] ✓ 视频已保存: {video_path}")
                 return True, video_path, ""
             else:
                 return False, None, f"下载视频失败: HTTP {response.status_code}"
@@ -2186,7 +2304,7 @@ def generate_video_with_canghe_api(
     except Exception as e:
         import traceback
         error_msg = str(e)
-        log_lines.append(f"> [苍何 API] ✗ 生成失败: {error_msg}")
+        log_lines.append(f"> [{provider_name}] ✗ 生成失败: {error_msg}")
         print(f"[视频生成] ✗ 异常: {error_msg}")
         print(f"[视频生成] 堆栈: {traceback.format_exc()}")
         cli_output_history.append(f"[视频生成] ✗ 失败: {error_msg[:100]}")
@@ -2252,11 +2370,12 @@ def generate_video_from_shot(
 
     log_lines.append(f"> [提示词] {full_prompt[:80]}..." if len(full_prompt) > 80 else f"> [提示词] {full_prompt}")
 
-    # ===== 优先使用苍何 API =====
+    # ===== 优先使用 SeedreamBest 同款云端 API =====
     config = get_saved_unified_config()
     if config.get("api_key") and config.get("video_enabled", True):
-        log_lines.append("> [引擎] 使用苍何 API 云端生成")
-        video_model = config.get("video_model", "veo3.1-fast")
+        video_model = config.get("video_model", "wan2.7-i2v-spicy")
+        engine_label = "MuleRouter Wan" if str(video_model).startswith("wan") else "苍何 API"
+        log_lines.append(f"> [引擎] 使用{engine_label}云端生成")
 
         success, video_path, error = generate_video_with_canghe_api(
             shot=shot,
@@ -2272,13 +2391,13 @@ def generate_video_from_shot(
             auto_save_project()
             log_lines.append("")
             log_lines.append("========================================")
-            log_lines.append(f"✓ 视频生成完成 (苍何 API)")
+            log_lines.append(f"✓ 视频生成完成 ({engine_label})")
             log_lines.append(f"  镜头: {shot_num} | 模型: {video_model}")
             log_lines.append(f"  风格: {style} | 时长: {duration} | 运镜: {camera}")
             log_lines.append("========================================")
             return "\n".join(log_lines), video_path
 
-        log_lines.append(f"> [苍何 API] 失败，尝试 ComfyUI 本地生成...")
+        log_lines.append(f"> [{engine_label}] 失败，尝试 ComfyUI 本地生成...")
 
     # ===== 回退到 ComfyUI =====
     log_lines.append("> [引擎] 使用 ComfyUI 本地生成")
@@ -2518,20 +2637,22 @@ def get_video_shot_choices() -> List[str]:
     choices = []
     for shot in current_project.shots:
         has_image = shot.output_image and os.path.exists(shot.output_image)
-        # 检查是否已有视频
-        has_video = False
-        if shot.output_image:
-            base_path = os.path.splitext(shot.output_image)[0]
-            for ext in ['.mp4', '.webm', '.avi']:
-                if os.path.exists(base_path + ext):
-                    has_video = True
-                    break
+        has_video = bool(find_matching_video_for_shot(shot))
 
         if has_image:
             status = "🎬" if has_video else "⏳"
             choices.append(f"{status} 镜头 {shot.shot_number}")
 
     return choices
+
+
+def refresh_video_ui_state():
+    """Refresh video cards, stats, and selectable shot choices together."""
+    return (
+        get_video_cards_html(),
+        get_video_stats_html(),
+        gr.update(choices=get_video_shot_choices(), value=[]),
+    )
 
 
 def generate_selected_videos(
@@ -2623,14 +2744,17 @@ def generate_all_videos(
     log_lines.append(f"> [参数] 时长: {duration}")
     log_lines.append(f"> [参数] 运镜: {camera}")
 
-    # 检查 ComfyUI 连接
+    # 云端 Wan 优先；ComfyUI 只作为本地回退。
+    cloud_api_key = resolve_generation_api_key()
     service = get_ai_service()
-    if service.comfyui_client is None:
-        log_lines.append("> [错误] ComfyUI 未连接")
-        log_lines.append("> [提示] 请先点击「连接 ComfyUI」按钮")
-        return "\n".join(log_lines), []
-    else:
+    if cloud_api_key:
+        log_lines.append("> [云端] ✓ MuleRouter/Wan 已配置，优先使用云端视频生成")
+    elif service.comfyui_client is not None:
         log_lines.append(f"> [ComfyUI] 已连接: {settings.comfyui_host}:{settings.comfyui_port}")
+    else:
+        log_lines.append("> [错误] MuleRouter API Key 未配置，且 ComfyUI 未连接")
+        log_lines.append("> [提示] 请配置 MuleRouter key 或连接 ComfyUI")
+        return "\n".join(log_lines), []
 
     if current_project is None:
         log_lines.append("> [错误] 请先创建项目")
@@ -2640,18 +2764,22 @@ def generate_all_videos(
         log_lines.append("> [错误] 请先添加镜头")
         return "\n".join(log_lines), []
 
-    total = len(current_project.shots)
-    log_lines.append(f"> [统计] 共 {total} 个镜头待处理")
+    target_shots = list(current_project.shots)
+    log_lines.append(f"> [统计] 共 {len(current_project.shots)} 个镜头")
 
     # 检查图生视频模式下是否所有镜头都有图片
     if gen_mode == "图生视频":
         with_image = [s.shot_number for s in current_project.shots if s.output_image]
         missing = [s.shot_number for s in current_project.shots if not s.output_image]
         log_lines.append(f"> [检查] 已有图片的镜头: {with_image}")
+        target_shots = [s for s in current_project.shots if s.output_image]
         if missing:
-            log_lines.append(f"> [错误] 以下镜头还没有生成图片: {missing}")
-            log_lines.append("> [提示] 请先在「③ 生成」中生成这些镜头的图片")
+            log_lines.append(f"> [跳过] 以下镜头还没有图片: {missing}")
+        if not target_shots:
+            log_lines.append("> [错误] 图生视频需要至少 1 个已生成图片的镜头")
             return "\n".join(log_lines), []
+    total = len(target_shots)
+    log_lines.append(f"> [统计] 本次待处理: {total} 个镜头")
 
     # 种子信息
     if current_project.lock_seed:
@@ -2686,7 +2814,7 @@ def generate_all_videos(
     success_count = 0
     fail_count = 0
 
-    for i, shot in enumerate(current_project.shots):
+    for i, shot in enumerate(target_shots):
         log_lines.append(f"> [{i+1}/{total}] 处理镜头 {shot.shot_number}...")
         log_lines.append("")
 
@@ -2746,14 +2874,18 @@ def generate_all_videos_with_cli(
     cli_lines.append("> [系统检查] 开始...")
     cli_lines.append("=" * 50)
 
-    # 检查 ComfyUI 连接
+    # 检查生成后端。云端 Wan 优先，ComfyUI 只是本地回退。
+    cloud_api_key = resolve_generation_api_key()
     service = get_ai_service()
-    if service.comfyui_client:
+    if cloud_api_key:
+        cli_lines.append("> [云端] ✓ MuleRouter/Wan 已配置")
+    elif service.comfyui_client:
         cli_lines.append(f"> [ComfyUI] ✓ 已连接 ({settings.comfyui_host}:{settings.comfyui_port})")
     else:
-        cli_lines.append(f"> [ComfyUI] ✗ 未连接")
-        cli_lines.append(f"> [提示] 请先点击「连接 ComfyUI」按钮")
-        return "ComfyUI 未连接", "\n".join(cli_lines), []
+        cli_lines.append("> [云端] ✗ MuleRouter API Key 未配置")
+        cli_lines.append("> [ComfyUI] ✗ 未连接")
+        cli_lines.append("> [提示] 请配置 MuleRouter key 或点击「连接 ComfyUI」")
+        return "视频生成后端未配置", "\n".join(cli_lines), []
 
     # 检查项目状态
     if current_project:
@@ -3765,19 +3897,11 @@ def get_video_cards_html() -> str:
     video_count = 0
     videos_data = []  # 收集视频数据用于弹窗
     for i, shot in enumerate(current_project.shots, 1):
-        # 检查是否有对应的视频文件（基于图片路径推断）
-        video_path = ""
-        has_video = False
-        if shot.output_image:
-            # 视频文件命名：与图片同名但扩展名为 .mp4
-            base_path = os.path.splitext(shot.output_image)[0]
-            for ext in ['.mp4', '.webm', '.avi']:
-                potential_video = base_path + ext
-                if os.path.exists(potential_video):
-                    video_path = potential_video
-                    has_video = True
-                    video_count += 1
-                    break
+        video_path = find_matching_video_for_shot(shot) or ""
+        has_video = bool(video_path)
+        if has_video:
+            shot.output_video = video_path
+            video_count += 1
 
         # 收集视频数据（转换路径为URL格式）
         video_url = ""
@@ -4071,12 +4195,8 @@ def get_video_stats_html() -> str:
     # 计算已生成视频数
     video_count = 0
     for shot in current_project.shots:
-        if shot.output_image:
-            base_path = os.path.splitext(shot.output_image)[0]
-            for ext in ['.mp4', '.webm', '.avi']:
-                if os.path.exists(base_path + ext):
-                    video_count += 1
-                    break
+        if find_matching_video_for_shot(shot):
+            video_count += 1
 
     return f'''
     <div class="video-stats">
@@ -6168,10 +6288,11 @@ def update_timeline_tracks(current_time: float):
 # ========================================
 
 # 全局 API 配置存储
+_ENV_LLM_CONFIG = get_env_llm_config()
 API_CONFIG = {
-    "llm": {"provider": "Claude Code CLI (默认)", "api_key": "", "api_url": ""},
-    "image": {"provider": "苍何 API (云端)", "api_key": "", "model": "nano-banana", "backend": "canghe"},
-    "video": {"provider": "智谱 CogVideoX (推荐)", "api_key": "", "api_url": ""}
+    "llm": _ENV_LLM_CONFIG if is_real_api_key(_ENV_LLM_CONFIG.get("api_key", "")) else {"provider": "Claude Code CLI (默认)", "api_key": "", "api_url": ""},
+    "image": {"provider": "SeedreamBest / MuleRouter Wan", "api_key": "", "model": "wan2.6-t2i", "backend": "canghe"},
+    "video": {"provider": "Wan 2.7 I2V Spicy", "api_key": "", "api_url": ""}
 }
 
 
@@ -6182,10 +6303,10 @@ def save_canghe_config(provider: str, api_key: str, model: str):
     from image_generator import set_canghe_api_key, set_canghe_model
     from ai_creative_generator import set_llm_config
 
-    if "苍何" in provider:
-        # 苍何 API 配置
+    if "苍何" in provider or "SeedreamBest" in provider or "MuleRouter" in provider or "Wan" in provider or "Ark" in provider:
+        # 云端图像模型配置
         if not api_key:
-            return "⚠️ 请填写苍何 API Key"
+            return "⚠️ 请填写 MuleRouter API Key"
 
         # 保存配置
         set_canghe_api_key(api_key)
@@ -6193,7 +6314,10 @@ def save_canghe_config(provider: str, api_key: str, model: str):
         IMAGE_BACKEND = "canghe"
 
         # 设置模型
-        if "即梦" in model or "Jimeng" in model:
+        if "Wan" in model or "Seedream" in model:
+            set_canghe_model("wan2.6-t2i")
+            model_name = "Wan 2.6 T2I"
+        elif "即梦" in model or "Jimeng" in model:
             set_canghe_model("jimeng")
             model_name = "即梦 (Jimeng)"
         else:
@@ -6201,7 +6325,7 @@ def save_canghe_config(provider: str, api_key: str, model: str):
             model_name = "Nano-Banana (Imagen)"
 
         API_CONFIG["image"] = {
-            "provider": "苍何 API",
+            "provider": provider,
             "api_key": api_key,
             "model": model_name,
             "backend": "canghe"
@@ -6216,7 +6340,7 @@ def save_canghe_config(provider: str, api_key: str, model: str):
         # 保存到配置文件
         save_user_config()
 
-        return f"✅ 已保存苍何 API 配置\n   模型: {model_name}"
+        return f"✅ 已保存图像生成配置\n   模型: {model_name}"
 
     else:
         # ComfyUI 配置
@@ -6246,7 +6370,7 @@ def save_llm_config(provider_cn, api_key_cn, api_url_cn, provider_intl, api_key_
 
     # 优先使用国内配置
     if provider_cn:
-        api_url = api_url_cn or get_default_llm_url(provider_cn)
+        api_url = normalize_chat_completions_url(api_url_cn or get_default_llm_url(provider_cn))
 
         # 苍何 API 特殊处理：如果没有单独填写 API Key，尝试使用图像配置的 key
         actual_api_key = api_key_cn
@@ -6260,6 +6384,7 @@ def save_llm_config(provider_cn, api_key_cn, api_url_cn, provider_intl, api_key_
             "provider": provider_cn,
             "api_key": actual_api_key,
             "api_url": api_url,
+            "model": os.environ.get("QWEN_LLM_MODEL", "qwen-plus") if "Qwen" in provider_cn else "",
             "region": "cn"
         }
 
@@ -6276,14 +6401,15 @@ def save_llm_config(provider_cn, api_key_cn, api_url_cn, provider_intl, api_key_
                 return f"⚠️ 已保存 LLM 配置: {provider_cn}，但未设置 API Key（请在图像生成配置中设置）"
         return f"✅ 已保存 LLM 配置: {provider_cn}"
     elif provider_intl and api_key_intl:
+        api_url = normalize_chat_completions_url(api_url_intl or get_default_llm_url(provider_intl))
         API_CONFIG["llm"] = {
             "provider": provider_intl,
             "api_key": api_key_intl,
-            "api_url": api_url_intl or get_default_llm_url(provider_intl),
+            "api_url": api_url,
             "region": "intl"
         }
         # 同步配置到 ai_creative_generator 模块
-        set_llm_config(provider=provider_intl, api_key=api_key_intl, api_url=api_url_intl or get_default_llm_url(provider_intl))
+        set_llm_config(provider=provider_intl, api_key=api_key_intl, api_url=api_url)
         # 保存到配置文件
         save_user_config()
         return f"✅ 已保存 LLM 配置: {provider_intl}"
@@ -6339,6 +6465,7 @@ def save_video_config(provider_cn, api_key_cn, api_url_cn, provider_intl, api_ke
 def get_default_llm_url(provider):
     """获取 LLM 默认 API 地址"""
     urls = {
+        "Qwen (OpenAI兼容)": normalize_chat_completions_url(os.environ.get("QWEN_API_URL") or os.environ.get("QWEN_BASE_URL", "")),
         "苍何 API": "https://api.canghe.ai/v1/chat/completions",
         "DeepSeek": "https://api.deepseek.com/chat/completions",
         "智谱 GLM (推荐)": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
@@ -6510,90 +6637,82 @@ def test_api_channels():
     # Fallback: 从 settings 读取
     if not api_key:
         try:
-            api_key = settings.api_key if settings.api_key != "your_api_key_here" else ""
+            api_key = getattr(settings, "mulerouter_api_key", "") or (settings.api_key if settings.api_key != "your_api_key_here" else "")
         except:
             pass
 
     # Fallback: 从环境变量读取
     if not api_key:
-        api_key = os.environ.get("CANGHE_API_KEY", "")
+        api_key = os.environ.get("MULEROUTER_API_KEY", "") or os.environ.get("CANGHE_API_KEY", "")
 
-    if not api_key:
+    if not api_key or api_key in ("your_api_key_here", "your_ark_api_key_here", "your_mulerouter_api_key_here"):
         return '''
         <div class="api-test-panel">
             <div class="api-test-header">🔌 API 连接测试</div>
-            <div class="api-test-error">❌ 未配置 API Key</div>
+            <div class="api-test-error">❌ 未配置 MuleRouter API Key</div>
         </div>
         '''
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
-
-    # 测试各个模型
+    image_model = saved_config.get("image_model") or getattr(settings, "mulerouter_image_model", "wan2.6-t2i")
+    video_model = saved_config.get("video_model") or getattr(settings, "mulerouter_video_model", "wan2.7-i2v-spicy")
+    image_base_url = getattr(settings, "mulerouter_image_base_url", "https://api.mulerouter.ai").rstrip("/")
+    video_base_url = getattr(settings, "mulerouter_video_base_url", "https://api.mulerouter.ai").rstrip("/")
     test_models = [
-        ("文字 - gemini-2.0-flash", "https://api.canghe.ai/v1/chat/completions",
-         {"model": "gemini-2.0-flash", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}),
-        ("文字 - gpt-4o", "https://api.canghe.ai/v1/chat/completions",
-         {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}),
-        ("图像 - DALL-E 3", "https://api.canghe.ai/v1/images/generations",
-         {"model": "dall-e-3", "prompt": "test", "n": 1, "size": "1024x1024"}),
-        ("图像 - Nano-Banana", "https://api.canghe.ai/fal-ai/nano-banana",
-         {"prompt": "test", "num_images": 1}),
-        ("视频 - 即梦", "https://api.canghe.ai/jimeng/submit/videos",
-         {"prompt": "test", "aspect_ratio": "16:9"}),
+        ("图像 - Wan 2.6 T2I", f"{image_base_url}/vendors/carrothub/v1/z-image-spicy/generation", image_model),
+        ("视频 - Wan 2.7 I2V Spicy", f"{video_base_url}/vendors/carrothub/v1/wan2.7-i2v-spicy/generation", video_model),
     ]
-
     results_html = ""
-    available_count = 0
+    available_count = len(test_models)
 
-    for name, url, payload in test_models:
+    for name, url, model in test_models:
+        results_html += f'''
+        <div class="api-channel success">
+            <span class="channel-name">{name}</span>
+            <span class="channel-status">✅ 已配置：{model}</span>
+        </div>'''
+
+    env_llm = get_env_llm_config()
+    qwen_key = env_llm.get("api_key", "")
+    qwen_url = env_llm.get("api_url", "")
+    qwen_model = env_llm.get("model", "qwen-plus")
+    total_count = len(test_models)
+    if qwen_key:
+        total_count += 1
+        qwen_status_class = "warning"
+        qwen_status = f"⚠️ 未验证：{qwen_model}"
         try:
-            # 只测试连接，设置很短的超时
-            resp = requests.post(url, headers=headers, json=payload, timeout=10)
-            data = resp.json()
-
-            if "error" in data:
-                error_msg = data.get("error", {}).get("message_zh", "") or data.get("error", {}).get("message", "")
-                if "无可用渠道" in error_msg or "饱和" in error_msg:
-                    results_html += f'''
-                    <div class="api-channel error">
-                        <span class="channel-name">{name}</span>
-                        <span class="channel-status">❌ {error_msg[:30]}</span>
-                    </div>'''
-                else:
-                    results_html += f'''
-                    <div class="api-channel warning">
-                        <span class="channel-name">{name}</span>
-                        <span class="channel-status">⚠️ {error_msg[:30]}</span>
-                    </div>'''
-            else:
+            models_url = qwen_url.rsplit("/chat/completions", 1)[0].rstrip("/") + "/models"
+            response = requests.get(
+                models_url,
+                headers={"Authorization": f"Bearer {qwen_key}"},
+                timeout=8,
+            )
+            if response.status_code == 200:
                 available_count += 1
-                results_html += f'''
-                <div class="api-channel success">
-                    <span class="channel-name">{name}</span>
-                    <span class="channel-status">✅ 可用</span>
-                </div>'''
-        except requests.exceptions.Timeout:
-            results_html += f'''
-            <div class="api-channel warning">
-                <span class="channel-name">{name}</span>
-                <span class="channel-status">⏱️ 超时</span>
-            </div>'''
-        except Exception as e:
-            results_html += f'''
-            <div class="api-channel error">
-                <span class="channel-name">{name}</span>
-                <span class="channel-status">❌ 错误</span>
-            </div>'''
+                qwen_status_class = "success"
+                qwen_status = f"✅ 可用：{qwen_model}"
+            elif response.status_code == 401:
+                qwen_status_class = "error"
+                qwen_status = "❌ Key 无效"
+            else:
+                qwen_status_class = "warning"
+                qwen_status = f"⚠️ HTTP {response.status_code}"
+        except Exception:
+            qwen_status_class = "warning"
+            qwen_status = "⚠️ 检测超时"
 
-    status_class = "success" if available_count >= 2 else ("warning" if available_count >= 1 else "error")
+        results_html += f'''
+        <div class="api-channel {qwen_status_class}">
+            <span class="channel-name">文字 - Qwen</span>
+            <span class="channel-status">{qwen_status}</span>
+        </div>'''
+
+    status_class = "success" if available_count == total_count else ("warning" if available_count > 0 else "error")
 
     return f'''
     <div class="api-test-panel">
         <div class="api-test-header {status_class}">
-            🔌 API 渠道状态 ({available_count}/4 可用)
+            🔌 API 渠道状态 ({available_count}/{total_count} 可用/已配置)
         </div>
         <div class="api-channels">
             {results_html}
@@ -6777,6 +6896,12 @@ def call_llm_api(prompt: str, system_prompt: str = "") -> str:
     global API_CONFIG
 
     llm_config = API_CONFIG.get("llm", {})
+    env_llm = get_env_llm_config()
+    if is_real_api_key(env_llm.get("api_key", "")) and (
+        not is_real_api_key(llm_config.get("api_key", "")) or "Claude Code CLI" in llm_config.get("provider", "")
+    ):
+        llm_config = env_llm
+        API_CONFIG["llm"] = env_llm
     provider = llm_config.get("provider", "Claude Code CLI (默认)")
 
     # 默认使用 Claude Code CLI（仅当明确选择 CLI 模式时）
@@ -6795,7 +6920,7 @@ def call_llm_api(prompt: str, system_prompt: str = "") -> str:
 
     # 其他 API 调用方式
     api_key = llm_config.get("api_key", "")
-    api_url = llm_config.get("api_url", "")
+    api_url = normalize_chat_completions_url(llm_config.get("api_url", ""))
 
     if not api_url:
         api_url = get_default_llm_url(provider)
@@ -6826,7 +6951,40 @@ def call_llm_api(prompt: str, system_prompt: str = "") -> str:
             else:
                 return f"API 调用失败: {response.status_code} - {response.text[:100]}"
 
-        # 通义千问 API 格式
+        # Qwen OpenAI-compatible API 格式
+        elif "Qwen" in provider or "OpenAI兼容" in provider:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+
+            data = {
+                "model": llm_config.get("model") or os.environ.get("QWEN_LLM_MODEL", "qwen-plus"),
+                "messages": messages,
+                "temperature": 0.7,
+                "max_tokens": 4096
+            }
+
+            api_monitor_start("Qwen")
+            cli_output_history.append("[Qwen] 调用 chat/completions...")
+            response = requests.post(api_url, headers=headers, json=data, timeout=60)
+            if response.status_code == 200:
+                result = response.json()
+                content = result.get("choices", [{}])[0].get("message", {}).get("content", "生成失败")
+                usage = result.get("usage", {})
+                tokens_used = usage.get("total_tokens", len(content) // 4)
+                api_monitor_end("Qwen", tokens_used, True)
+                cli_output_history.append(f"[Qwen] ✓ 生成成功 ({len(content)} 字符, {tokens_used} tokens)")
+                return content
+            api_monitor_end("Qwen", 0, False)
+            cli_output_history.append(f"[Qwen] ✗ 失败: {response.status_code}")
+            return f"API 调用失败: {response.status_code} - {response.text[:100]}"
+
+        # 通义千问 DashScope API 格式
         elif "通义" in provider or "dashscope" in api_url:
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -8615,27 +8773,27 @@ def create_ui():
         </style>
         """)
 
-        with gr.Accordion("🌊 苍何 API 配置（点击展开设置）", open=False, elem_classes="canghe-config-compact"):
+        with gr.Accordion("🌋 SeedreamBest Wan 模型配置（点击展开设置）", open=False, elem_classes="canghe-config-compact"):
             canghe_status_display = gr.HTML(value=get_canghe_api_status())
 
             with gr.Row():
                 canghe_unified_key = gr.Textbox(
                     label="API Key",
-                    placeholder="输入苍何 API Key",
+                    placeholder="输入 MuleRouter API Key",
                     type="password",
                     value=_unified_config.get("api_key", ""),
                     scale=3
                 )
                 canghe_image_model = gr.Dropdown(
-                    ["Nano-Banana (Imagen)", "即梦 (Jimeng)"],
+                    ["Wan 2.6 T2I (SeedreamBest)", "Nano-Banana (Imagen)", "即梦 (Jimeng)"],
                     label="图像模型",
-                    value="即梦 (Jimeng)" if "jimeng" in _unified_config.get("image_model", "") else "Nano-Banana (Imagen)",
+                    value="Wan 2.6 T2I (SeedreamBest)" if "wan" in _unified_config.get("image_model", "") or "seedream" in _unified_config.get("image_model", "") or "doubao" in _unified_config.get("image_model", "") else ("即梦 (Jimeng)" if "jimeng" in _unified_config.get("image_model", "") else "Nano-Banana (Imagen)"),
                     scale=2
                 )
                 canghe_video_model = gr.Dropdown(
-                    ["veo3.1-fast", "veo3.1", "veo3.1-pro", "veo3-fast", "jimeng-video-3.0"],
+                    ["wan2.7-i2v-spicy", "wan2.6-i2v", "wan2.6-t2v", "veo3.1-fast", "veo3.1", "veo3.1-pro", "veo3-fast", "jimeng-video-3.0"],
                     label="视频模型",
-                    value=_unified_config.get("video_model", "veo3.1-fast"),
+                    value=_unified_config.get("video_model", "wan2.7-i2v-spicy"),
                     scale=2
                 )
 
@@ -9024,7 +9182,7 @@ def create_ui():
                 # LLM 设置
                 with gr.Accordion("🤖 语言模型", open=False):
                     llm_provider_cn = gr.Radio(
-                        ["Claude Code CLI (默认)", "苍何 API", "DeepSeek", "智谱 GLM", "通义千问", "OpenAI GPT"],
+                        ["Claude Code CLI (默认)", "Qwen (OpenAI兼容)", "苍何 API", "DeepSeek", "智谱 GLM", "通义千问", "OpenAI GPT"],
                         label="",
                         value=get_saved_llm_provider(),
                         container=False
@@ -9051,18 +9209,18 @@ def create_ui():
                 with gr.Accordion("🎨 图像生成", open=False):
                     gr.HTML("""
                     <div style="padding: 8px 12px; background: rgba(59, 130, 246, 0.1); border-radius: 8px; margin-bottom: 8px; border: 1px solid rgba(59, 130, 246, 0.2);">
-                        <span style="color: #93c5fd; font-size: 12px;">💡 苍何 API 配置请在页面顶部「🌊 苍何 API 配置」中设置</span>
+                        <span style="color: #93c5fd; font-size: 12px;">💡 SeedreamBest 同款 Wan 图像模型请在页面顶部「🌋 SeedreamBest Wan 模型配置」中设置</span>
                     </div>
                     """)
                     _saved_backend = get_saved_image_backend()
                     img_provider_cn = gr.Radio(
-                        ["苍何 API (云端)", "本地 ComfyUI"],
+                        ["SeedreamBest / MuleRouter Wan", "苍何 API (云端)", "本地 ComfyUI"],
                         label="选择引擎",
                         value=_saved_backend
                     )
 
                     # 苍何 API 配置区域 (可手动切换模型)
-                    _is_canghe = "苍何" in _saved_backend
+                    _is_canghe = "苍何" in _saved_backend or "SeedreamBest" in _saved_backend
                     with gr.Group(visible=_is_canghe) as canghe_config_group:
                         # 隐藏的输入框，保持兼容性
                         canghe_api_key_input = gr.Textbox(
@@ -9071,14 +9229,14 @@ def create_ui():
                             value=get_saved_canghe_api_key()
                         )
                         canghe_model_select = gr.Radio(
-                            ["Nano-Banana (默认)", "DALL-E 3"],
+                            ["Wan 2.6 T2I (默认)", "Nano-Banana (默认)", "DALL-E 3"],
                             label="图像生成模型",
                             value=get_saved_canghe_model_v2(),
                             interactive=True
                         )
                         gr.HTML('''
                         <div style="font-size:10px;color:#64748b;margin-top:4px;padding:4px 8px;background:rgba(100,116,139,0.1);border-radius:4px;">
-                            💡 Nano-Banana 默认 | DALL-E 3 备用（稳定）
+                            💡 Wan 2.6 T2I 默认 | 支持文生图、图生图、多参考图
                         </div>
                         ''')
                         with gr.Row():
@@ -9136,13 +9294,13 @@ def create_ui():
                 with gr.Accordion("🎬 视频生成", open=False):
                     gr.HTML("""
                     <div style="padding: 8px 12px; background: rgba(139, 92, 246, 0.1); border-radius: 8px; margin-bottom: 8px; border: 1px solid rgba(139, 92, 246, 0.2);">
-                        <span style="color: #a78bfa; font-size: 12px;">💡 苍何视频 (VEO/即梦) 配置请在顶部「🌊 苍何 API 配置」中设置</span>
+                        <span style="color: #a78bfa; font-size: 12px;">💡 Wan 视频配置请在顶部「🌋 SeedreamBest Wan 模型配置」中设置</span>
                     </div>
                     """)
                     video_provider_cn = gr.Radio(
-                        ["苍何 API (推荐)", "本地 ComfyUI"],
+                        ["Wan 2.7 I2V Spicy (推荐)", "苍何 API", "本地 ComfyUI"],
                         label="选择引擎",
-                        value="苍何 API (推荐)"
+                        value="Wan 2.7 I2V Spicy (推荐)"
                     )
                     video_api_key_cn = gr.Textbox(
                         label="API Key",
@@ -11767,8 +11925,8 @@ def create_ui():
             inputs=[story_idea_input],
             outputs=template_outputs
         ).then(
-            lambda: (get_video_cards_html(), get_video_stats_html()),
-            outputs=[video_cards_html, video_stats_html]
+            refresh_video_ui_state,
+            outputs=[video_cards_html, video_stats_html, video_shot_checkboxes]
         ).then(
             get_api_monitor_html,
             outputs=[api_monitor_html]
@@ -12039,6 +12197,9 @@ def create_ui():
         ).then(
             lambda: (get_project_summary(), get_shot_list(), get_shot_cards_html()),
             outputs=[project_summary, shot_list, shot_cards_html]
+        ).then(
+            refresh_video_ui_state,
+            outputs=[video_cards_html, video_stats_html, video_shot_checkboxes]
         )
 
         # 生成全部
@@ -12048,6 +12209,9 @@ def create_ui():
         ).then(
             lambda: (get_project_summary(), get_shot_list(), get_shot_cards_html()),
             outputs=[project_summary, shot_list, shot_cards_html]
+        ).then(
+            refresh_video_ui_state,
+            outputs=[video_cards_html, video_stats_html, video_shot_checkboxes]
         )
 
         # 种子锁定设置
@@ -12061,6 +12225,9 @@ def create_ui():
         refresh_cards_btn.click(
             get_shot_cards_html,
             outputs=[shot_cards_html]
+        ).then(
+            refresh_video_ui_state,
+            outputs=[video_cards_html, video_stats_html, video_shot_checkboxes]
         )
 
         # ========================================
@@ -12105,13 +12272,13 @@ def create_ui():
             ],
             outputs=[batch_video_status, video_cli_output, video_gallery]
         ).then(
-            lambda: (get_video_cards_html(), get_video_stats_html()),
-            outputs=[video_cards_html, video_stats_html]
+            refresh_video_ui_state,
+            outputs=[video_cards_html, video_stats_html, video_shot_checkboxes]
         )
 
         # 刷新视频卡片
         refresh_video_cards_btn.click(
-            lambda: (get_video_cards_html(), get_video_stats_html(), gr.update(choices=get_video_shot_choices())),
+            refresh_video_ui_state,
             outputs=[video_cards_html, video_stats_html, video_shot_checkboxes]
         )
 
@@ -12139,8 +12306,8 @@ def create_ui():
             inputs=[video_shot_checkboxes, video_gen_mode_quick, video_style_quick, gr.State("5秒"), video_camera_quick],
             outputs=[video_cli_output, selected_video_status, video_cards_html]
         ).then(
-            lambda: (get_video_stats_html(), gr.update(choices=get_video_shot_choices())),
-            outputs=[video_stats_html, video_shot_checkboxes]
+            refresh_video_ui_state,
+            outputs=[video_cards_html, video_stats_html, video_shot_checkboxes]
         )
 
         # 手动保存项目
@@ -12153,6 +12320,9 @@ def create_ui():
         manual_load_btn.click(
             manual_load_project,
             outputs=[batch_video_status, video_cards_html, video_stats_html]
+        ).then(
+            lambda: gr.update(choices=get_video_shot_choices(), value=[]),
+            outputs=[video_shot_checkboxes]
         )
 
         # 图片历史加载 - 只加载图片
@@ -12161,8 +12331,8 @@ def create_ui():
             inputs=[image_history_dropdown],
             outputs=[batch_video_status, shot_cards_html]
         ).then(
-            lambda: (get_video_cards_html(), get_video_stats_html()),
-            outputs=[video_cards_html, video_stats_html]
+            refresh_video_ui_state,
+            outputs=[video_cards_html, video_stats_html, video_shot_checkboxes]
         )
 
         # 图片历史加载 - 只加载视频
@@ -12171,8 +12341,8 @@ def create_ui():
             inputs=[image_history_dropdown],
             outputs=[batch_video_status, shot_cards_html]
         ).then(
-            lambda: (get_video_cards_html(), get_video_stats_html()),
-            outputs=[video_cards_html, video_stats_html]
+            refresh_video_ui_state,
+            outputs=[video_cards_html, video_stats_html, video_shot_checkboxes]
         )
 
         # 图片历史加载 - 全部加载（图片+视频）
@@ -12181,8 +12351,8 @@ def create_ui():
             inputs=[image_history_dropdown],
             outputs=[batch_video_status, shot_cards_html]
         ).then(
-            lambda: (get_video_cards_html(), get_video_stats_html()),
-            outputs=[video_cards_html, video_stats_html]
+            refresh_video_ui_state,
+            outputs=[video_cards_html, video_stats_html, video_shot_checkboxes]
         )
 
         # 刷新图片历史下拉列表
@@ -12203,6 +12373,9 @@ def create_ui():
             generate_single_video_with_cli,
             inputs=[single_video_shot_num],
             outputs=[batch_video_status, video_cli_output, video_cards_html, video_stats_html]
+        ).then(
+            lambda: gr.update(choices=get_video_shot_choices(), value=[]),
+            outputs=[video_shot_checkboxes]
         )
 
         # 导出

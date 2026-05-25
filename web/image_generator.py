@@ -42,6 +42,7 @@ class ImageBackend(str, Enum):
 
 class CangheImageModel(str, Enum):
     """苍何 API 支持的图像模型"""
+    SEEDREAM = "wan2.6-t2i"      # SeedreamBest 同款 MuleRouter/Wan 图像模型
     NANO_BANANA = "nano-banana"  # Google Imagen (Fal.ai)
     JIMENG = "jimeng"            # 即梦图像生成
     DALLE3 = "dall-e-3"          # DALL-E 3 (OpenAI)
@@ -70,7 +71,7 @@ class JimengStatus(str, Enum):
 # ============================================
 
 # 当前选择的模型 (可通过 set_canghe_model 修改)
-_current_canghe_model = CangheImageModel.NANO_BANANA  # 即梦仅支持视频，图像使用 nano-banana
+_current_canghe_model = CangheImageModel.SEEDREAM
 _canghe_api_key = ""
 
 
@@ -100,6 +101,9 @@ def get_canghe_api_key() -> str:
     # 尝试从 settings 获取
     try:
         from settings import settings
+        router_key = getattr(settings, "mulerouter_api_key", "")
+        if router_key and router_key not in ("your_api_key_here", "your_ark_api_key_here", "your_mulerouter_api_key_here"):
+            return router_key
         return settings.api_key
     except:
         return ""
@@ -109,7 +113,9 @@ def set_canghe_model(model: str):
     """设置苍何 API 图像模型"""
     global _current_canghe_model
     model_lower = model.lower()
-    if "jimeng" in model_lower or "即梦" in model:
+    if "wan" in model_lower or "mulerouter" in model_lower or "seedream" in model_lower or "doubao-seedream" in model_lower or "豆包" in model:
+        _current_canghe_model = CangheImageModel.SEEDREAM
+    elif "jimeng" in model_lower or "即梦" in model:
         _current_canghe_model = CangheImageModel.JIMENG
     elif "dall" in model_lower or "dalle" in model_lower:
         _current_canghe_model = CangheImageModel.DALLE3
@@ -296,6 +302,36 @@ class CangheImageGenerator:
                 return False, [], f"生成失败: {str(e)}"
 
     # ========================================
+    # SeedreamBest 同款 MuleRouter/Wan 图像生成
+    # ========================================
+
+    async def _generate_seedream_async(
+        self,
+        prompt: str,
+        reference_images: List[str] = None,
+        num_images: int = 1,
+        aspect_ratio: str = "16:9",
+    ) -> Tuple[bool, List[Dict], str]:
+        """使用 SeedreamBest 同款 MuleRouter/Wan 生成图像"""
+        try:
+            from mulerouter_providers import generate_wan_image
+            from settings import settings
+
+            images = await generate_wan_image(
+                api_key=self.api_key,
+                prompt=prompt,
+                images=reference_images or [],
+                base_url=getattr(settings, "mulerouter_image_base_url", "https://api.mulerouter.ai"),
+                ratio=aspect_ratio,
+                output_count=num_images,
+            )
+            print(f"[Wan] ✓ 生成成功! 获取到 {len(images)} 张图片")
+            return True, images, ""
+        except Exception as e:
+            print(f"[Wan] ✗ 生成失败: {e}")
+            return False, [], f"Wan 图像生成失败: {str(e)}"
+
+    # ========================================
     # DALL-E 3 图像生成
     # ========================================
 
@@ -479,8 +515,20 @@ class CangheImageGenerator:
                     "4:3": "1024x1024",
                     "3:4": "1024x1024",
                 }
+                reference_images, _ = self.collect_reference_images(shot, project)
 
-                if current_model == CangheImageModel.JIMENG:
+                if current_model == CangheImageModel.SEEDREAM:
+                    print(f"[INFO] 使用 SeedreamBest 同款 Wan 2.6 图像模型生成图像...")
+                    used_model = CangheImageModel.SEEDREAM
+                    success, images, error = loop.run_until_complete(
+                        self._generate_seedream_async(
+                            full_prompt,
+                            reference_images=reference_images,
+                            num_images=1,
+                            aspect_ratio=project.aspect_ratio,
+                        )
+                    )
+                elif current_model == CangheImageModel.JIMENG:
                     # 即梦API不支持图像生成，自动回退到 nano-banana
                     print(f"[INFO] 即梦仅支持视频生成，自动使用 nano-banana 生成图像...")
                     used_model = CangheImageModel.NANO_BANANA
@@ -533,6 +581,7 @@ class CangheImageGenerator:
                 if image_url:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     model_map = {
+                        CangheImageModel.SEEDREAM: "wan",
                         CangheImageModel.JIMENG: "jimeng",
                         CangheImageModel.DALLE3: "dalle3",
                         CangheImageModel.NANO_BANANA: "nb"
@@ -793,7 +842,7 @@ def create_generator(api_key: str = "", output_dir: str = "outputs", backend: st
                 print(f"[create_generator] 从 app 模块获取配置: api_key={unified_api_key[:10] if unified_api_key else 'None'}..., image_enabled={unified_image_enabled}")
                 if unified_api_key and unified_image_enabled:
                     api_key = unified_api_key
-                    model = model or unified_config.get("image_model", "nano-banana")
+                    model = model or unified_config.get("image_model", CangheImageModel.SEEDREAM.value)
                     backend = "canghe"  # 强制使用苍何 API
                     print(f"[create_generator] 强制使用苍何 API, model={model}")
     except Exception as e:
@@ -819,7 +868,7 @@ def create_generator(api_key: str = "", output_dir: str = "outputs", backend: st
                             unified_api_key = canghe_unified.get("api_key", "")
                             if unified_api_key:
                                 api_key = unified_api_key
-                                model = model or canghe_unified.get("image_model", "nano-banana")
+                                model = model or canghe_unified.get("image_model", CangheImageModel.SEEDREAM.value)
                                 backend = "canghe"
                                 print(f"[create_generator] 从配置文件获取: api_key={unified_api_key[:10]}..., model={model}")
                                 break
@@ -850,12 +899,12 @@ def create_generator(api_key: str = "", output_dir: str = "outputs", backend: st
 
         if not api_key:
             raise ValueError(
-                "苍何 API 密钥未配置。请在 .env 中设置 CANGHE_API_KEY，"
+                "MuleRouter API 密钥未配置。请在 .env 中设置 MULEROUTER_API_KEY，"
                 "或使用 IMAGE_BACKEND=comfyui 切换到本地生成。"
             )
 
         model_name = model or get_canghe_model().value
-        print(f"[INFO] 使用苍何 API 云端生成 (模型: {model_name})")
+        print(f"[INFO] 使用云端图像生成 (模型: {model_name})")
         return CangheImageGenerator(api_key, output_dir, model)
 
 

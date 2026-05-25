@@ -19,9 +19,21 @@ from enum import Enum
 # ============================================
 # 模块级 LLM 配置（可被 app.py 动态设置）
 # ============================================
-_llm_provider = "Claude Code CLI"  # 默认使用 Claude CLI
-_llm_api_key = ""
-_llm_api_url = ""
+_llm_provider = os.environ.get("LLM_PROVIDER") or ("Qwen (OpenAI兼容)" if os.environ.get("QWEN_API_KEY") else "Claude Code CLI")
+_llm_api_key = os.environ.get("QWEN_API_KEY", "")
+_llm_api_url = os.environ.get("QWEN_API_URL") or os.environ.get("QWEN_BASE_URL", "")
+_llm_model = os.environ.get("QWEN_LLM_MODEL", "qwen-plus")
+
+
+def _normalize_chat_completions_url(api_url: str) -> str:
+    api_url = (api_url or "").strip().rstrip("/")
+    if not api_url:
+        return ""
+    if api_url.endswith("/chat/completions"):
+        return api_url
+    if api_url.endswith("/v1"):
+        return f"{api_url}/chat/completions"
+    return api_url
 
 
 def set_llm_config(provider: str = None, api_key: str = None, api_url: str = None):
@@ -395,10 +407,10 @@ class AICreativeGenerator:
 
     def _call_canghe_api(self, prompt: str) -> Tuple[bool, str]:
         """
-        调用苍何 API 进行文本生成
+        调用 OpenAI-compatible API 进行文本生成
         Returns: (success, output or error)
         """
-        global _llm_api_key, _llm_api_url
+        global _llm_api_key, _llm_api_url, _llm_model, _llm_provider
 
         # 获取 API key（可能从图像生成配置共享）
         api_key = _llm_api_key
@@ -410,9 +422,9 @@ class AICreativeGenerator:
                 pass
 
         if not api_key:
-            return False, "苍何 API Key 未配置"
+            return False, f"{_llm_provider} API Key 未配置"
 
-        api_url = _llm_api_url or "https://api.canghe.ai/v1/chat/completions"
+        api_url = _normalize_chat_completions_url(_llm_api_url or "https://api.canghe.ai/v1/chat/completions")
 
         try:
             headers = {
@@ -421,23 +433,23 @@ class AICreativeGenerator:
             }
 
             data = {
-                "model": "gemini-2.0-flash",
+                "model": _llm_model,
                 "messages": [
-                    {"role": "system", "content": "你是一个专业的分镜故事创作助手，擅长根据用户输入创作详细的角色、场景和镜头设定。"},
-                    {"role": "user", "content": prompt}
+                    {"role": "system", "content": "你是一个专业的分镜故事创作助手。禁止输出思考过程、分析步骤、解释文字，只输出一个完整有效的 JSON 对象。"},
+                    {"role": "user", "content": "/no_think\n只输出 JSON，不要输出 <think>、Markdown 说明或任何解释。\n\n" + prompt}
                 ],
                 "temperature": 0.7,
-                "max_tokens": 4096
+                "max_tokens": 12000
             }
 
             # 尝试更新 app.py 的监控状态
             try:
                 from app import api_monitor_start, api_monitor_end
-                api_monitor_start("苍何 API (故事)")
+                api_monitor_start(f"{_llm_provider} (故事)")
             except:
                 pass
 
-            print(f"[苍何 API] 正在调用 chat/completions...")
+            print(f"[{_llm_provider}] 正在调用 chat/completions...")
             response = requests.post(api_url, headers=headers, json=data, timeout=self.timeout)
 
             if response.status_code == 200:
@@ -448,10 +460,10 @@ class AICreativeGenerator:
                 tokens_used = usage.get("total_tokens", len(content) // 4 if content else 0)
 
                 if content:
-                    print(f"[苍何 API] ✓ 生成成功 ({len(content)} 字符, {tokens_used} tokens)")
+                    print(f"[{_llm_provider}] ✓ 生成成功 ({len(content)} 字符, {tokens_used} tokens)")
                     try:
                         from app import api_monitor_end
-                        api_monitor_end("苍何 API (故事)", tokens_used, True)
+                        api_monitor_end(f"{_llm_provider} (故事)", tokens_used, True)
                     except:
                         pass
                     return True, content
@@ -461,10 +473,10 @@ class AICreativeGenerator:
                         api_monitor_end("苍何 API (故事)", 0, False)
                     except:
                         pass
-                    return False, "苍何 API 返回空内容"
+                    return False, f"{_llm_provider} 返回空内容"
             else:
-                error_msg = f"苍何 API 调用失败: {response.status_code} - {response.text[:200]}"
-                print(f"[苍何 API] ✗ {error_msg}")
+                error_msg = f"{_llm_provider} 调用失败: {response.status_code} - {response.text[:200]}"
+                print(f"[{_llm_provider}] ✗ {error_msg}")
                 try:
                     from app import api_monitor_end
                     api_monitor_end("苍何 API (故事)", 0, False)
@@ -478,14 +490,14 @@ class AICreativeGenerator:
                 api_monitor_end("苍何 API (故事)", 0, False)
             except:
                 pass
-            return False, "苍何 API 请求超时"
+            return False, f"{_llm_provider} 请求超时"
         except Exception as e:
             try:
                 from app import api_monitor_end
                 api_monitor_end("苍何 API (故事)", 0, False)
             except:
                 pass
-            return False, f"苍何 API 调用错误: {str(e)}"
+            return False, f"{_llm_provider} 调用错误: {str(e)}"
 
     def _call_claude_cli(self, prompt: str) -> Tuple[bool, str]:
         """
@@ -498,14 +510,14 @@ class AICreativeGenerator:
         # 调试日志
         print(f"[AICreativeGenerator] _call_claude_cli called, provider={_llm_provider}, has_key={bool(_llm_api_key)}")
 
-        # 检查是否配置了苍何 API
-        if "苍何" in _llm_provider:
+        # 检查是否配置了 OpenAI-compatible API
+        if "苍何" in _llm_provider or "Qwen" in _llm_provider or "OpenAI兼容" in _llm_provider:
             success, output = self._call_canghe_api(prompt)
             if success:
                 return success, output
-            # 苍何 API 失败，直接返回错误，不回退到 Claude CLI
-            print(f"[LLM] 苍何 API 调用失败: {output}")
-            return False, f"苍何 API 调用失败: {output}"
+            # 已显式配置 API 时，失败直接返回错误，不回退到 Claude CLI。
+            print(f"[LLM] {_llm_provider} 调用失败: {output}")
+            return False, f"{_llm_provider} 调用失败: {output}"
 
         # 使用 Claude CLI
         import shutil
@@ -632,20 +644,46 @@ class AICreativeGenerator:
         if json_match:
             json_str = json_match.group(1)
         else:
+            cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
             # Try to parse entire text as JSON
-            json_str = text.strip()
+            json_str = cleaned.strip()
 
         try:
             return json.loads(json_str)
         except json.JSONDecodeError:
-            # Try to find JSON object in text
-            start = text.find('{')
-            end = text.rfind('}') + 1
-            if start >= 0 and end > start:
-                try:
-                    return json.loads(text[start:end])
-                except:
-                    pass
+            cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+            # Try balanced JSON objects, preferring objects that contain the expected schema.
+            starts = [m.start() for m in re.finditer(r'\{', cleaned)]
+            for start in starts:
+                depth = 0
+                in_string = False
+                escape = False
+                for idx in range(start, len(cleaned)):
+                    ch = cleaned[idx]
+                    if in_string:
+                        if escape:
+                            escape = False
+                        elif ch == '\\':
+                            escape = True
+                        elif ch == '"':
+                            in_string = False
+                    else:
+                        if ch == '"':
+                            in_string = True
+                        elif ch == '{':
+                            depth += 1
+                        elif ch == '}':
+                            depth -= 1
+                            if depth == 0:
+                                candidate = cleaned[start:idx + 1]
+                                try:
+                                    parsed = json.loads(candidate)
+                                    if isinstance(parsed, dict) and (
+                                        "shots" in parsed or "characters" in parsed or "scenes" in parsed
+                                    ):
+                                        return parsed
+                                except Exception:
+                                    break
             return None
 
     def analyze_story(self, story_text: str) -> StoryAnalysisResult:
@@ -694,6 +732,10 @@ class AICreativeGenerator:
         # Parse JSON response
         data = self._extract_json(output)
         if not data:
+            if is_short_idea:
+                fallback = self._generate_fallback_story(story_text.strip())
+                fallback.description += "（AI 输出格式异常，已使用本地兜底结构生成）"
+                return fallback
             result.error = f"Failed to parse response as JSON. Response: {output[:500]}"
             return result
 

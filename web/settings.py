@@ -57,6 +57,30 @@ class Settings:
         "CANGHE_API_BASE_URL", "https://api.canghe.ai"
     ))
 
+    mulerouter_api_key: str = field(default_factory=lambda: os.environ.get(
+        "MULEROUTER_API_KEY",
+        os.environ.get(
+            "SEEDREAMBEST_IMAGE_PROVIDER_API_KEY",
+            os.environ.get("SEEDREAMBEST_VIDEO_PROVIDER_API_KEY", os.environ.get("CANGHE_API_KEY", ""))
+        )
+    ))
+    mulerouter_image_base_url: str = field(default_factory=lambda: os.environ.get(
+        "SEEDREAMBEST_IMAGE_PROVIDER_BASE_URL",
+        os.environ.get("MULEROUTER_IMAGE_BASE_URL", os.environ.get("MULEROUTER_BASE_URL", "https://api.mulerouter.ai"))
+    ))
+    mulerouter_video_base_url: str = field(default_factory=lambda: os.environ.get(
+        "SEEDREAMBEST_VIDEO_PROVIDER_BASE_URL",
+        os.environ.get("MULEROUTER_VIDEO_BASE_URL", os.environ.get("MULEROUTER_BASE_URL", "https://api.mulerouter.ai"))
+    ))
+    mulerouter_image_model: str = field(default_factory=lambda: os.environ.get(
+        "SEEDREAMBEST_IMAGE_PROVIDER_MODEL",
+        os.environ.get("MULEROUTER_IMAGE_MODEL", "wan2.6-t2i")
+    ))
+    mulerouter_video_model: str = field(default_factory=lambda: os.environ.get(
+        "SEEDREAMBEST_VIDEO_PROVIDER_MODEL",
+        os.environ.get("MULEROUTER_VIDEO_MODEL", "wan2.7-i2v-spicy")
+    ))
+
     # ===========================================
     # 图像生成后端
     # ===========================================
@@ -221,12 +245,13 @@ class Settings:
 
         # 检查 API 密钥
         if self.image_backend == "canghe":
-            if not self.api_key or self.api_key == "your_api_key_here":
+            effective_key = self.mulerouter_api_key or self.api_key
+            if not effective_key or effective_key in ("your_api_key_here", "your_ark_api_key_here", "your_mulerouter_api_key_here"):
                 if strict:
-                    errors.append("CANGHE_API_KEY 未配置 - 图像生成将无法使用")
+                    errors.append("MULEROUTER_API_KEY 未配置 - Wan 生成将无法使用")
                 else:
-                    print("\n[警告] 苍何 API 密钥未配置 - 图像生成将无法使用")
-                    print("       请在 .env 中设置 CANGHE_API_KEY\n")
+                    print("\n[警告] MuleRouter API 密钥未配置 - Wan 生成将无法使用")
+                    print("       请在 .env 中设置 MULEROUTER_API_KEY 或 SEEDREAMBEST_IMAGE_PROVIDER_API_KEY\n")
 
         # 检查 ComfyUI 配置
         if self.image_backend == "comfyui":
