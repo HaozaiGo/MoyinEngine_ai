@@ -16,6 +16,7 @@ import os
 import json
 import shutil
 import time
+import html
 import gradio as gr
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
@@ -696,8 +697,8 @@ def get_image_batches(project_name: str = None) -> List[Dict]:
         mtime = first_file.stat().st_mtime
         time_str = datetime.fromtimestamp(mtime).strftime("%m/%d %H:%M")
 
-        # 检查是否有视频
-        has_videos = any(f.with_suffix('.mp4').exists() for f in batch)
+        # 检查是否有视频（视频可能带模型后缀，如 shot_001_xxx_wan2_7-i2v-spicy.mp4）
+        has_videos = any(_find_videos_for_image_path(f) for f in batch)
 
         result.append({
             'id': i,
@@ -723,6 +724,194 @@ def get_image_history_choices() -> List[str]:
         choices.append(f"[{batch['time']}] {batch['count']}张图片{video_mark}")
 
     return choices
+
+
+IMAGE_HISTORY_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+VIDEO_HISTORY_EXTS = (".mp4", ".webm", ".avi", ".mov")
+
+
+def _find_videos_for_image_path(image_path: Path) -> List[Path]:
+    """查找与某张历史图片同名或同前缀的视频。"""
+    candidates: List[Path] = []
+    for ext in VIDEO_HISTORY_EXTS:
+        exact = image_path.with_suffix(ext)
+        if exact.exists():
+            candidates.append(exact)
+        candidates.extend(image_path.parent.glob(f"{image_path.stem}_*{ext}"))
+
+    unique = {str(path.resolve()): path for path in candidates if path.exists()}
+    return sorted(unique.values(), key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def _list_history_media(project_name: str = "") -> Tuple[List[Path], List[Path]]:
+    """列出历史项目里的图片和视频文件。"""
+    roots: List[Path] = []
+    if project_name and project_name != "全部历史任务":
+        project_dir = OUTPUTS_DIR / project_name
+        if project_dir.exists():
+            roots.append(project_dir)
+    elif OUTPUTS_DIR.exists():
+        roots = [p for p in OUTPUTS_DIR.iterdir() if p.is_dir()]
+
+    images: List[Path] = []
+    videos: List[Path] = []
+    for root in roots:
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            suffix = path.suffix.lower()
+            if suffix in IMAGE_HISTORY_EXTS:
+                images.append(path)
+            elif suffix in VIDEO_HISTORY_EXTS:
+                videos.append(path)
+
+    images.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    videos.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return images, videos
+
+
+def _parse_history_project_choice(choice: str) -> str:
+    if not choice or choice == "无历史任务":
+        return ""
+    if choice == "全部历史任务":
+        return "全部历史任务"
+    if "] " in choice and " (" in choice:
+        return choice.split("] ", 1)[1].rsplit(" (", 1)[0]
+    return choice
+
+
+def _history_project_choices() -> List[str]:
+    if not OUTPUTS_DIR.exists():
+        return ["无历史任务"]
+
+    projects = []
+    for project_dir in OUTPUTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+        images, videos = _list_history_media(project_dir.name)
+        if not images and not videos:
+            continue
+        latest = max([p.stat().st_mtime for p in images + videos])
+        time_str = datetime.fromtimestamp(latest).strftime("%m/%d %H:%M")
+        projects.append((latest, f"[{time_str}] {project_dir.name} ({len(images)}图/{len(videos)}视频)"))
+
+    if not projects:
+        return ["无历史任务"]
+
+    projects.sort(key=lambda item: item[0], reverse=True)
+    return ["全部历史任务"] + [choice for _, choice in projects]
+
+
+def get_history_project_choices() -> List[str]:
+    """获取历史任务项目选项。"""
+    return _history_project_choices()
+
+
+def get_history_batch_choices(project_choice: str) -> List[str]:
+    """获取某个历史项目下的批次选项。"""
+    project_name = _parse_history_project_choice(project_choice)
+    if not project_name or project_name == "全部历史任务":
+        return ["全部媒体"]
+
+    batches = get_image_batches(project_name)
+    choices = ["全部媒体"]
+    for batch in reversed(batches):
+        video_count = sum(len(_find_videos_for_image_path(Path(path))) for path in batch["files"])
+        video_mark = f" +{video_count}视频" if video_count else ""
+        choices.append(f"[{batch['time']}] {batch['count']}张图片{video_mark}")
+    return choices
+
+
+def update_history_batch_choices(project_choice: str):
+    choices = get_history_batch_choices(project_choice)
+    return gr.update(choices=choices, value=choices[0] if choices else None)
+
+
+def _history_media_url(path: Path) -> str:
+    return "/file=" + str(path.resolve()).replace("\\", "/")
+
+
+def _history_batch_from_choice(project_name: str, batch_choice: str) -> Optional[Dict]:
+    if not project_name or project_name == "全部历史任务" or batch_choice == "全部媒体":
+        return None
+
+    batches = get_image_batches(project_name)
+    choices = get_history_batch_choices(project_name)
+    try:
+        choice_idx = choices.index(batch_choice) - 1
+        if choice_idx < 0:
+            return None
+        batch_idx = len(batches) - 1 - choice_idx
+        return batches[batch_idx]
+    except (ValueError, IndexError):
+        return None
+
+
+def _history_video_html(videos: List[Path]) -> str:
+    if not videos:
+        return '<div class="history-empty">暂无历史视频</div>'
+
+    cards = []
+    for video in videos[:60]:
+        project_name = html.escape(video.parent.name)
+        name = html.escape(video.name)
+        time_str = datetime.fromtimestamp(video.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        url = html.escape(_history_media_url(video), quote=True)
+        cards.append(f'''
+        <div class="history-video-card">
+            <video src="{url}" controls preload="metadata"></video>
+            <div class="history-video-meta">
+                <div class="history-video-title">{name}</div>
+                <div class="history-video-sub">{project_name} · {time_str}</div>
+            </div>
+        </div>
+        ''')
+    return '<div class="history-video-grid">' + "".join(cards) + "</div>"
+
+
+def load_history_task(project_choice: str, batch_choice: str) -> Tuple[str, List, str]:
+    """加载历史任务媒体，用于浏览历史图片和视频。"""
+    project_name = _parse_history_project_choice(project_choice)
+    if not project_name:
+        return "请选择历史任务", [], '<div class="history-empty">暂无历史视频</div>'
+
+    batch = _history_batch_from_choice(project_name, batch_choice)
+    if batch:
+        images = [Path(path) for path in batch["files"] if Path(path).exists()]
+        videos = []
+        for image_path in images:
+            videos.extend(_find_videos_for_image_path(image_path))
+        unique_videos = {str(path.resolve()): path for path in videos}
+        videos = sorted(unique_videos.values(), key=lambda path: path.stat().st_mtime, reverse=True)
+    else:
+        list_project = "" if project_name == "全部历史任务" else project_name
+        images, videos = _list_history_media(list_project)
+
+    image_gallery = []
+    for image in images[:120]:
+        project_label = image.parent.name
+        time_str = datetime.fromtimestamp(image.stat().st_mtime).strftime("%m/%d %H:%M")
+        image_gallery.append((str(image), f"{project_label} · {image.name} · {time_str}"))
+
+    latest_times = [p.stat().st_mtime for p in images + videos]
+    latest_text = datetime.fromtimestamp(max(latest_times)).strftime("%Y-%m-%d %H:%M") if latest_times else "-"
+    summary = f"已加载 {project_name}：{len(images)} 张图片 / {len(videos)} 个视频，最近更新 {latest_text}"
+    return summary, image_gallery, _history_video_html(videos)
+
+
+def refresh_history_task_view() -> Tuple[Any, Any, str, List, str]:
+    projects = get_history_project_choices()
+    project_value = projects[0] if projects else None
+    batches = get_history_batch_choices(project_value or "")
+    batch_value = batches[0] if batches else None
+    summary, images, videos_html = load_history_task(project_value or "", batch_value or "")
+    return (
+        gr.update(choices=projects, value=project_value),
+        gr.update(choices=batches, value=batch_value),
+        summary,
+        images,
+        videos_html,
+    )
 
 
 def _get_batch_from_choice(batch_choice: str):
@@ -2935,7 +3124,7 @@ def generate_single_video_with_cli(shot_num: int) -> Tuple[str, str, str, str]:
         scene_ref=None
     )
     # status 已经包含详细日志
-    short_status = f"镜头 {shot_num} " + ("✓ 完成" if "✓" in status or "成功" in status else "✗ 失败")
+    short_status = f"镜头 {shot_num} " + ("✓ 完成" if video_path else "✗ 失败")
     return short_status, status, get_video_cards_html(), get_video_stats_html()
 
 
@@ -3906,8 +4095,7 @@ def get_video_cards_html() -> str:
         # 收集视频数据（转换路径为URL格式）
         video_url = ""
         if has_video and video_path:
-            # 使用Gradio 6.x正确的文件服务端点格式
-            video_url = "/gradio_api/file=" + video_path.replace("\\", "/")
+            video_url = "/file=" + video_path.replace("\\", "/")
         videos_data.append({
             "num": i,
             "video_path": video_url,
@@ -6694,6 +6882,33 @@ def test_api_channels():
             elif response.status_code == 401:
                 qwen_status_class = "error"
                 qwen_status = "❌ Key 无效"
+            elif response.status_code in (404, 405):
+                # Some OpenAI-compatible gateways only expose chat/completions.
+                # Validate the actual generation path before marking it unavailable.
+                chat_response = requests.post(
+                    qwen_url,
+                    headers={
+                        "Authorization": f"Bearer {qwen_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": qwen_model,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "temperature": 0,
+                        "max_tokens": 1,
+                    },
+                    timeout=15,
+                )
+                if chat_response.status_code == 200:
+                    available_count += 1
+                    qwen_status_class = "success"
+                    qwen_status = f"✅ 可用：{qwen_model}"
+                elif chat_response.status_code == 401:
+                    qwen_status_class = "error"
+                    qwen_status = "❌ Key 无效"
+                else:
+                    qwen_status_class = "warning"
+                    qwen_status = f"⚠️ Chat HTTP {chat_response.status_code}"
             else:
                 qwen_status_class = "warning"
                 qwen_status = f"⚠️ HTTP {response.status_code}"
@@ -10524,6 +10739,91 @@ def create_ui():
                 | 网页剧本 | HTML网页格式，离线可查看 | 分享给团队成员查看 |
                 """)
 
+            # ===== 历史任务 =====
+            with gr.Tab("⑤ 历史任务", elem_id="tab-history"):
+                gr.Markdown("### 历史任务")
+                gr.Markdown("查看历史生成的图片和视频，支持按项目和批次浏览。")
+                gr.HTML("""
+                <style>
+                    .history-video-grid {
+                        display: grid;
+                        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+                        gap: 14px;
+                    }
+                    .history-video-card {
+                        background: var(--card-dark);
+                        border: 1px solid var(--border-dark);
+                        border-radius: 8px;
+                        overflow: hidden;
+                    }
+                    .history-video-card video {
+                        width: 100%;
+                        aspect-ratio: 16 / 9;
+                        background: #05070a;
+                        display: block;
+                    }
+                    .history-video-meta {
+                        padding: 10px 12px;
+                    }
+                    .history-video-title {
+                        color: var(--text-primary);
+                        font-size: 12px;
+                        font-weight: 600;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                    }
+                    .history-video-sub,
+                    .history-empty {
+                        color: var(--text-secondary);
+                        font-size: 12px;
+                    }
+                    .history-empty {
+                        padding: 18px;
+                        background: var(--card-dark);
+                        border: 1px solid var(--border-dark);
+                        border-radius: 8px;
+                    }
+                </style>
+                """)
+
+                with gr.Row():
+                    history_project_dropdown = gr.Dropdown(
+                        label="历史任务",
+                        choices=get_history_project_choices(),
+                        value=(get_history_project_choices()[0] if get_history_project_choices() else None),
+                        scale=3,
+                        allow_custom_value=False,
+                    )
+                    history_batch_dropdown = gr.Dropdown(
+                        label="批次",
+                        choices=get_history_batch_choices((get_history_project_choices()[0] if get_history_project_choices() else "")),
+                        value="全部媒体",
+                        scale=2,
+                        allow_custom_value=False,
+                    )
+                    refresh_history_task_btn = gr.Button("刷新", elem_classes="secondary-btn", scale=0, min_width=70)
+                    load_history_task_btn = gr.Button("查看", elem_classes="primary-btn", scale=0, min_width=70)
+
+                history_task_status = gr.Textbox(
+                    label="",
+                    show_label=False,
+                    interactive=False,
+                    container=False,
+                    placeholder="选择历史任务后点击查看"
+                )
+
+                with gr.Tabs():
+                    with gr.Tab("图片"):
+                        history_images_gallery = gr.Gallery(
+                            label="历史图片",
+                            columns=4,
+                            height=520,
+                            allow_preview=True,
+                        )
+                    with gr.Tab("视频"):
+                        history_videos_html = gr.HTML(value='<div class="history-empty">请选择历史任务</div>')
+
             # ===== AI 创作 =====
             with gr.Tab("🔧 高级:AI创作", elem_id="tab-ai-creative", visible=False):
 
@@ -12359,6 +12659,40 @@ def create_ui():
         refresh_history_btn.click(
             lambda: gr.update(choices=get_image_history_choices()),
             outputs=[image_history_dropdown]
+        )
+
+        # 历史任务浏览
+        history_project_dropdown.change(
+            update_history_batch_choices,
+            inputs=[history_project_dropdown],
+            outputs=[history_batch_dropdown]
+        ).then(
+            load_history_task,
+            inputs=[history_project_dropdown, history_batch_dropdown],
+            outputs=[history_task_status, history_images_gallery, history_videos_html]
+        )
+
+        history_batch_dropdown.change(
+            load_history_task,
+            inputs=[history_project_dropdown, history_batch_dropdown],
+            outputs=[history_task_status, history_images_gallery, history_videos_html]
+        )
+
+        load_history_task_btn.click(
+            load_history_task,
+            inputs=[history_project_dropdown, history_batch_dropdown],
+            outputs=[history_task_status, history_images_gallery, history_videos_html]
+        )
+
+        refresh_history_task_btn.click(
+            refresh_history_task_view,
+            outputs=[
+                history_project_dropdown,
+                history_batch_dropdown,
+                history_task_status,
+                history_images_gallery,
+                history_videos_html
+            ]
         )
 
         # 视频预览触发（从镜头卡片点击触发）
